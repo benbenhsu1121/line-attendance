@@ -11,13 +11,20 @@
     .card { background: white; width: 100%; max-width: 400px; border-radius: 16px; padding: 24px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); text-align: center; }
     .avatar { width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 12px; background: #eee; }
     h2 { margin: 0 0 4px; color: #333; }
-    p.sub { margin: 0 0 20px; color: #888; font-size: 14px; }
-    .info-box { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 12px; margin-bottom: 20px; text-align: left; font-size: 13px; color: #555; }
-    .btn-group { display: flex; gap: 12px; }
+    p.sub { margin: 0 0 16px; color: #888; font-size: 13px; }
+    .info-box { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 12px; margin-bottom: 16px; text-align: left; font-size: 13px; color: #444; }
+    .info-row { margin-bottom: 6px; }
+    .site-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+    .site-inside { background: #e6f9e6; color: #1e7e34; }
+    .site-outside { background: #fff3cd; color: #856404; }
+    .btn-group { display: flex; gap: 12px; margin-top: 12px; }
     button { flex: 1; padding: 14px; border: none; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }
     .btn-in { background-color: #00c300; color: white; }
     .btn-out { background-color: #e04b4b; color: white; }
-    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    .btn-warning { background-color: #ff9800; color: white; }
+    button:disabled { background-color: #ccc !important; cursor: not-allowed; }
+    #remoteReasonBox { display: none; margin-top: 12px; text-align: left; }
+    #remoteReasonBox input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; margin-top: 4px; }
     #status { margin-top: 16px; font-size: 13px; color: #666; }
   </style>
 </head>
@@ -29,8 +36,15 @@
   <p class="sub" id="userUid">LINE ID: 取得中...</p>
 
   <div class="info-box">
-    <div><strong>打卡時間：</strong><span id="currentTime">--:--:--</span></div>
-    <div><strong>目前位置：</strong><span id="locAddress">定位中...</span></div>
+    <div class="info-row"><strong>打卡時間：</strong><span id="currentTime">--:--:--</span></div>
+    <div class="info-row"><strong>目前位置：</strong><span id="locAddress">定位中...</span></div>
+    <div class="info-row"><strong>工地比對：</strong><span id="siteStatus" class="site-badge site-outside">檢測中...</span></div>
+  </div>
+
+  <!-- 超出範圍時顯示的報備輸入框 -->
+  <div id="remoteReasonBox">
+    <label style="font-size: 12px; color: #d9534f; font-weight: bold;">⚠️ 超出工地範圍，請輸入外勤/派遣原因：</label>
+    <input type="text" id="overrideReason" placeholder="例如：主管口頭調派至某工地、材料行" value="主管臨時調派">
   </div>
 
   <div class="btn-group">
@@ -57,17 +71,39 @@
 
   const MY_LIFF_ID = "2011667192-mzmPgQFd";
 
+  // 🌟 1. 設定你的工地清單（名稱、經緯度、允許半徑：公尺）
+  const PROJECT_SITES = [
+    { name: "中和總部/工坊", lat: 24.9984, lon: 121.5123, radius: 300 },
+    { name: "板橋A工地", lat: 25.0135, lon: 121.4641, radius: 300 },
+    { name: "新莊B案場", lat: 25.0421, lon: 121.4485, radius: 300 }
+  ];
+
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
   let currentCoords = null;
   let currentAddress = "未知地址";
   let currentUser = { userId: "", displayName: "" };
+  let matchedSite = null;
+  let isOutOfRange = true;
 
   setInterval(() => {
-    const now = new Date();
-    document.getElementById("currentTime").innerText = now.toLocaleTimeString();
+    document.getElementById("currentTime").innerText = new Date().toLocaleTimeString();
   }, 1000);
+
+  // Haversine 公式計算兩點經緯度距離（公尺）
+  function getDistanceInMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return Math.round(R * c);
+  }
 
   async function initLiff() {
     try {
@@ -104,40 +140,75 @@
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude
         };
+
+        // 比對工地距離
+        checkSiteFences(currentCoords.latitude, currentCoords.longitude);
+
         await reverseGeocode(currentCoords.latitude, currentCoords.longitude);
       },
       (err) => {
-        document.getElementById("status").innerText = "定位失敗，請確認已開放 GPS 權限";
+        document.getElementById("status").innerText = "定位失敗，請允許開啟 GPS 權限";
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
   }
 
+  function checkSiteFences(userLat, userLon) {
+    let nearestSite = null;
+    let minDistance = Infinity;
+
+    for (const site of PROJECT_SITES) {
+      const dist = getDistanceInMeters(userLat, userLon, site.lat, site.lon);
+      if (dist < minDistance) {
+        minDistance = dist;
+        nearestSite = { ...site, distance: dist };
+      }
+    }
+
+    const siteBadge = document.getElementById("siteStatus");
+    const reasonBox = document.getElementById("remoteReasonBox");
+
+    if (nearestSite && nearestSite.distance <= nearestSite.radius) {
+      // 🌟 在 300 公尺工地內
+      isOutOfRange = false;
+      matchedSite = nearestSite.name;
+      siteBadge.className = "site-badge site-inside";
+      siteBadge.innerText = `在【${nearestSite.name}】範圍內 (${nearestSite.distance}m)`;
+      reasonBox.style.display = "none";
+    } else {
+      // ⚠️ 超出工地範圍（開放外勤報備）
+      isOutOfRange = true;
+      matchedSite = nearestSite ? `距最近工地【${nearestSite.name}】${nearestSite.distance}公尺` : "不在已知工地";
+      siteBadge.className = "site-badge site-outside";
+      siteBadge.innerText = `不在工地範圍內 (${nearestSite ? nearestSite.distance + 'm' : ''})`;
+      reasonBox.style.display = "block";
+    }
+  }
+
   async function reverseGeocode(lat, lon) {
     try {
-      document.getElementById("locAddress").innerText = "正在解析地址...";
       const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`, {
         headers: { "Accept-Language": "zh-TW" }
       });
       const data = await res.json();
       currentAddress = data.display_name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
       document.getElementById("locAddress").innerText = currentAddress;
-
-      document.getElementById("btnIn").disabled = false;
-      document.getElementById("btnOut").disabled = false;
-      document.getElementById("status").innerText = "準備就緒，請點選打卡";
     } catch {
       currentAddress = `經緯度: (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
       document.getElementById("locAddress").innerText = currentAddress;
-      document.getElementById("btnIn").disabled = false;
-      document.getElementById("btnOut").disabled = false;
     }
+
+    document.getElementById("btnIn").disabled = false;
+    document.getElementById("btnOut").disabled = false;
+    document.getElementById("status").innerText = isOutOfRange ? "⚠️ 您目前不在工地，請輸入外勤原因後打卡" : "已就緒，請點選打卡";
   }
 
   window.submitCheckIn = async function(type) {
     document.getElementById("btnIn").disabled = true;
     document.getElementById("btnOut").disabled = true;
-    document.getElementById("status").innerText = "打卡資料傳輸中...";
+    document.getElementById("status").innerText = "打卡傳輸中...";
+
+    const overrideReason = isOutOfRange ? (document.getElementById("overrideReason").value.trim() || "未填寫異地原因") : "";
 
     try {
       await addDoc(collection(db, "check_ins"), {
@@ -147,13 +218,15 @@
         latitude: currentCoords.latitude,
         longitude: currentCoords.longitude,
         address: currentAddress,
+        siteName: matchedSite,
+        isOutOfRange: isOutOfRange,         // 是否超出範圍
+        overrideReason: overrideReason,     // 外勤/派遣報備原因
         timestamp: serverTimestamp(),
         syncedToLocal: false
       });
 
       alert(type === "clock_in" ? "上班打卡成功！" : "下班打卡成功！");
-      document.getElementById("status").innerText = "打卡成功，視窗即將關閉...";
-      setTimeout(() => { liff.closeWindow(); }, 1500);
+      setTimeout(() => { liff.closeWindow(); }, 1200);
     } catch (e) {
       alert("打卡失敗: " + e.message);
       document.getElementById("btnIn").disabled = false;
